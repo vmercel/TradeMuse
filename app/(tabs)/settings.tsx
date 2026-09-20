@@ -100,10 +100,12 @@ export default function SettingsScreen() {
     mode,
     guardrails,
     backendUrl,
+    backendKey,
     liveRiskAcknowledged,
     setMode,
     updateGuardrails,
     setBackendUrlValue,
+    setBackendKeyValue,
   } = useAppState();
   const [sheetVisible, setSheetVisible] = useState(false);
   const [maxPosition, setMaxPosition] = useState(
@@ -223,6 +225,17 @@ export default function SettingsScreen() {
             placeholderTextColor={theme.muted}
             autoCapitalize="none"
             autoCorrect={false}
+          />
+          <Text style={styles.label}>Backend API key</Text>
+          <TextInput
+            style={styles.input}
+            value={backendKey}
+            onChangeText={setBackendKeyValue}
+            placeholder="Paste the x-trademuse-key"
+            placeholderTextColor={theme.muted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
           />
           <Muted>
             Used when the real backend replaces the mock layer. Broker API

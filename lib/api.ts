@@ -1,25 +1,25 @@
 /**
- * TradingApp backend client.
+ * TradeMuse backend client.
  *
  * Typed async interface for everything the app needs from the backend.
- * Every method currently routes to the mock layer (USE_MOCK = true).
+ * Every method routes to the mock layer while USE_MOCK = true.
  *
- * REAL BACKEND PLAN (Supabase edge functions, TODO):
- *   - getAccount      -> GET /account            (Alpaca paper account)
- *   - getPositions     -> GET /positions
- *   - getOrders        -> GET /orders
- *   - getQuotes        -> GET /quotes?symbols=...
- *   - createProposal   -> POST /proposals         (agent writes a proposal)
- *   - listProposals    -> GET /proposals
- *   - approveProposal  -> POST /proposals/:id/approve  (marks approved; the
- *                          backend, not the phone, places the Alpaca order)
- *   - rejectProposal   -> POST /proposals/:id/reject
- *   - placeOrder       -> POST /orders            (manual order ticket;
+ * LIVE BACKEND (Supabase edge function trademuse-api):
+ *   POST {BACKEND_URL} with header x-trademuse-key and JSON {action, ...}
+ *   - getAccount      -> {action:"account"}            (Alpaca paper account)
+ *   - getPositions    -> {action:"positions"}
+ *   - getOrders       -> {action:"orders"}
+ *   - getQuotes       -> {action:"quotes", symbols:[]}
+ *   - createProposal  -> {action:"proposal_create", ...} (agent writes proposal)
+ *   - listProposals   -> {action:"proposal_list"}
+ *   - approveProposal -> {action:"proposal_approve", id} (backend places order)
+ *   - rejectProposal  -> {action:"proposal_reject", id}
+ *   - placeOrder      -> {action:"order_place", ...}    (manual ticket;
  *                          backend enforces guardrails + kill switch)
  *
  * SECURITY: never put API keys, secrets, or broker credentials in this file
  * or anywhere in the app bundle. The phone only ever talks to our backend
- * with the user's session token. Alpaca keys live server side only.
+ * with the x-trademuse-key from Settings. Alpaca keys live server side only.
  */
 
 import {
@@ -43,7 +43,12 @@ export type Mode = "paper" | "live";
 export type Side = "buy" | "sell";
 export type OrderType = "market" | "limit";
 export type OrderStatus = "filled" | "pending" | "cancelled" | "rejected";
-export type ProposalStatus = "pending" | "approved" | "rejected" | "executed";
+export type ProposalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "executed"
+  | "failed";
 
 export interface Account {
   equity: number;
@@ -128,14 +133,21 @@ export interface Guardrails {
 /* Client                                                              */
 /* ------------------------------------------------------------------ */
 
-/** Master switch. Keep true until the Supabase backend is live. */
+/** Master switch. Keep true until the Supabase backend URL + key are set. */
 export const USE_MOCK = true;
 
 /** Base URL of the backend, configured in Settings. Unused while mocking. */
 export let BACKEND_URL = "";
 
+/** Backend API key (x-trademuse-key), configured in Settings. Never hardcoded. */
+export let BACKEND_KEY = "";
+
 export function setBackendUrl(url: string): void {
   BACKEND_URL = url.trim().replace(/\/+$/, "");
+}
+
+export function setBackendKey(key: string): void {
+  BACKEND_KEY = key.trim();
 }
 
 export interface TradingClient {
@@ -164,7 +176,7 @@ function backendNotWired(method: string): Error {
   );
 }
 
-export const api: TradingClient = {
+const mockApi: TradingClient = {
   async getAccount(mode: Mode): Promise<Account> {
     if (USE_MOCK) {
       await latency();
@@ -299,3 +311,162 @@ export const api: TradingClient = {
     throw backendNotWired("getActivity");
   },
 };
+
+/* ------------------------------------------------------------------ */
+/* Live backend: Supabase edge function trademuse-api                   */
+/* ------------------------------------------------------------------ */
+
+function confidenceToLabel(n: number): "low" | "medium" | "high" {
+  if (n <= 33) return "low";
+  if (n <= 66) return "medium";
+  return "high";
+}
+
+function mapProposal(p: any): Proposal {
+  return {
+    id: String(p.id),
+    symbol: String(p.symbol),
+    side: p.side,
+    qty: Number(p.qty),
+    orderType: p.order_type,
+    limitPrice: p.limit_price != null ? Number(p.limit_price) : undefined,
+    rationale: String(p.rationale || ""),
+    confidence: confidenceToLabel(Number(p.confidence ?? 50)),
+    status: p.status,
+    createdAt: String(p.created_at),
+    decidedAt: p.decided_at ? String(p.decided_at) : undefined,
+  };
+}
+
+function mapAlpacaOrder(o: any, mode: Mode): Order {
+  const raw = String(o.status || "pending").toLowerCase();
+  const status: OrderStatus =
+    raw === "filled" ? "filled" : raw === "canceled" || raw === "cancelled" ? "cancelled" : raw === "rejected" || raw === "expired" ? "rejected" : "pending";
+  return {
+    id: String(o.id),
+    symbol: String(o.symbol),
+    qty: Number(o.qty),
+    side: o.side,
+    type: o.order_type === "limit" ? "limit" : "market",
+    limitPrice: o.limit_price != null ? Number(o.limit_price) : undefined,
+    status,
+    filledPrice: o.filled_avg_price != null ? Number(o.filled_avg_price) : undefined,
+    createdAt: String(o.created_at),
+    mode,
+  };
+}
+
+class SupabaseBackend implements TradingClient {
+  private async call<T>(action: string, params: Record<string, unknown> = {}): Promise<T> {
+    if (!BACKEND_URL) throw new Error("Backend URL is not set. Add it in Settings.");
+    if (!BACKEND_KEY) throw new Error("Backend API key is not set. Add it in Settings.");
+    const res = await fetch(BACKEND_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-trademuse-key": BACKEND_KEY },
+      body: JSON.stringify({ action, ...params }),
+    });
+    let data: any = null;
+    try {
+      data = await res.json();
+    } catch {
+      throw new Error(`Backend returned HTTP ${res.status} with no JSON body.`);
+    }
+    if (!res.ok) throw new Error(data && data.message ? data.message : `Backend error ${res.status}.`);
+    return data as T;
+  }
+
+  async getAccount(mode: Mode): Promise<Account> {
+    const { account } = await this.call<{ account: any }>("account");
+    const equity = Number(account.equity);
+    const dayPnL = equity - Number(account.last_equity);
+    return {
+      equity,
+      cash: Number(account.cash),
+      buyingPower: Number(account.buying_power),
+      dayPnL,
+      dayPnLPercent: Number(account.last_equity) ? (dayPnL / Number(account.last_equity)) * 100 : 0,
+      mode,
+    };
+  }
+
+  async getPositions(_mode: Mode): Promise<Position[]> {
+    const { positions } = await this.call<{ positions: any[] }>("positions");
+    return (positions || []).map((p) => ({
+      symbol: String(p.symbol),
+      qty: Number(p.qty),
+      avgEntryPrice: Number(p.avg_entry_price),
+      currentPrice: Number(p.current_price),
+      marketValue: Number(p.market_value),
+      unrealizedPnL: Number(p.unrealized_pl),
+      unrealizedPnLPercent: Number(p.unrealized_plpc) * 100,
+      dayChangePercent: Number(p.change_today || 0) * 100,
+    }));
+  }
+
+  async getOrders(mode: Mode): Promise<Order[]> {
+    const { orders } = await this.call<{ orders: any[] }>("orders");
+    return (orders || []).map((o) => mapAlpacaOrder(o, mode));
+  }
+
+  async getQuotes(symbols: string[]): Promise<Quote[]> {
+    const { quotes } = await this.call<{ quotes: Record<string, any> }>("quotes", { symbols });
+    return symbols.map((s) => {
+      const q = quotes && quotes[s.toUpperCase()];
+      const last = q && (q.ask != null ? Number(q.ask) : q.bid != null ? Number(q.bid) : 0);
+      return { symbol: s.toUpperCase(), lastPrice: last || 0, dayChange: 0, dayChangePercent: 0, volume: 0 };
+    });
+  }
+
+  async createProposal(input: ProposalInput): Promise<Proposal> {
+    const confidence = input.confidence === "low" ? 25 : input.confidence === "high" ? 75 : 50;
+    const { proposal } = await this.call<{ proposal: any }>("proposal_create", {
+      symbol: input.symbol,
+      side: input.side,
+      qty: input.qty,
+      order_type: input.orderType,
+      limit_price: input.limitPrice,
+      rationale: input.rationale,
+      confidence,
+    });
+    return mapProposal(proposal);
+  }
+
+  async listProposals(): Promise<Proposal[]> {
+    const { proposals } = await this.call<{ proposals: any[] }>("proposal_list");
+    return (proposals || []).map(mapProposal);
+  }
+
+  async approveProposal(id: string, _mode: Mode): Promise<Proposal> {
+    const res = await this.call<{ proposal: any; result: string; message?: string }>("proposal_approve", { id });
+    if (res.result !== "executed") {
+      throw new Error(res.message || `Proposal was not executed (result: ${res.result}).`);
+    }
+    return mapProposal(res.proposal);
+  }
+
+  async rejectProposal(id: string): Promise<Proposal> {
+    const { proposal } = await this.call<{ proposal: any }>("proposal_reject", { id });
+    return mapProposal(proposal);
+  }
+
+  async placeOrder(input: OrderInput, mode: Mode): Promise<Order> {
+    const { order } = await this.call<{ order: any }>("order_place", {
+      symbol: input.symbol,
+      side: input.side,
+      qty: input.qty,
+      order_type: input.type,
+      limit_price: input.limitPrice,
+    });
+    return mapAlpacaOrder(order, mode);
+  }
+
+  async getActivity(): Promise<ActivityEntry[]> {
+    throw new Error("Activity feed is not available from the backend yet.");
+  }
+}
+
+/**
+ * The client the screens use. Mock while USE_MOCK is true;
+ * flip to the Supabase backend once URL + key are set in Settings.
+ */
+export const api: TradingClient = USE_MOCK ? mockApi : new SupabaseBackend();

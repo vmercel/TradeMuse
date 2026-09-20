@@ -1,21 +1,23 @@
 /**
- * Shared app state: trading mode, guardrails, backend URL.
+ * Shared app state: trading mode, guardrails, backend URL + key.
  * Provided at the root layout so every tab reads the same values.
  */
 
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { defaultGuardrails } from "./mockData";
-import { setBackendUrl } from "./api";
+import { setBackendKey, setBackendUrl } from "./api";
 import type { Guardrails, Mode } from "./api";
 
 interface AppState {
   mode: Mode;
   guardrails: Guardrails;
   backendUrl: string;
+  backendKey: string;
   liveRiskAcknowledged: boolean;
   setMode: (mode: Mode) => void;
   updateGuardrails: (patch: Partial<Guardrails>) => void;
   setBackendUrlValue: (url: string) => void;
+  setBackendKeyValue: (key: string) => void;
   acknowledgeLiveRisk: () => void;
 }
 
@@ -25,6 +27,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [mode, setModeState] = useState<Mode>("paper");
   const [guardrails, setGuardrails] = useState<Guardrails>(defaultGuardrails);
   const [backendUrl, setBackendUrlState] = useState("");
+  const [backendKey, setBackendKeyState] = useState("");
   const [liveRiskAcknowledged, setLiveRiskAcknowledged] = useState(false);
 
   const setMode = (next: Mode) => {
@@ -43,6 +46,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     setBackendUrl(url);
   };
 
+  const setBackendKeyValue = (key: string) => {
+    setBackendKeyState(key);
+    setBackendKey(key);
+  };
+
   const acknowledgeLiveRisk = () => setLiveRiskAcknowledged(true);
 
   return (
@@ -51,10 +59,12 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         mode,
         guardrails,
         backendUrl,
+        backendKey,
         liveRiskAcknowledged,
         setMode,
         updateGuardrails,
         setBackendUrlValue,
+        setBackendKeyValue,
         acknowledgeLiveRisk,
       }}
     >
