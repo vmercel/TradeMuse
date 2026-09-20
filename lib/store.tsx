@@ -5,7 +5,7 @@
 
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { defaultGuardrails } from "./mockData";
-import { setBackendKey, setBackendUrl } from "./api";
+import { DEFAULT_BACKEND_URL, setBackendKey, setBackendUrl } from "./api";
 import type { Guardrails, Mode } from "./api";
 
 interface AppState {
@@ -26,7 +26,8 @@ const AppStateContext = createContext<AppState | null>(null);
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const [mode, setModeState] = useState<Mode>("paper");
   const [guardrails, setGuardrails] = useState<Guardrails>(defaultGuardrails);
-  const [backendUrl, setBackendUrlState] = useState("");
+  // Backend URL is prefilled; the API key is entered once in Settings.
+  const [backendUrl, setBackendUrlState] = useState(DEFAULT_BACKEND_URL);
   const [backendKey, setBackendKeyState] = useState("");
   const [liveRiskAcknowledged, setLiveRiskAcknowledged] = useState(false);
 

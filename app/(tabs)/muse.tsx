@@ -19,6 +19,7 @@ import { api, type ActivityEntry, type Proposal } from "../../lib/api";
 import { useAppState } from "../../lib/store";
 import {
   Card,
+  EmptyState,
   Muted,
   SectionTitle,
   formatDateTime,
@@ -27,8 +28,8 @@ import {
 } from "../../components/ui";
 
 const confidenceColor: Record<Proposal["confidence"], string> = {
-  high: theme.green,
-  medium: theme.amber,
+  high: theme.accent,
+  medium: theme.warn,
   low: theme.muted,
 };
 
@@ -46,7 +47,7 @@ function ProposalCard({
   canDecide: boolean;
 }) {
   const pending = proposal.status === "pending";
-  const sideColor = proposal.side === "buy" ? theme.green : theme.red;
+  const sideColor = proposal.side === "buy" ? theme.accent : theme.danger;
   return (
     <Card style={styles.proposalCard}>
       <View style={styles.proposalHeader}>
@@ -82,7 +83,11 @@ function ProposalCard({
             <Text style={styles.actionText}>Reject</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.action, styles.approve, (!canDecide || busy) && styles.actionDisabled]}
+            style={[
+              styles.action,
+              styles.approve,
+              (!canDecide || busy) && styles.actionDisabled,
+            ]}
             onPress={onApprove}
             disabled={busy || !canDecide}
           >
@@ -113,9 +118,9 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
       <View
         style={[
           styles.dot,
-          entry.kind === "order" && { backgroundColor: theme.green },
-          entry.kind === "proposal" && { backgroundColor: theme.accent },
-          entry.kind === "guardrail" && { backgroundColor: theme.red },
+          entry.kind === "order" && { backgroundColor: theme.accent },
+          entry.kind === "proposal" && { backgroundColor: theme.warn },
+          entry.kind === "guardrail" && { backgroundColor: theme.danger },
           entry.kind === "system" && { backgroundColor: theme.muted },
         ]}
       />
@@ -132,6 +137,7 @@ export default function MuseScreen() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const liveMode = mode === "live";
@@ -139,12 +145,15 @@ export default function MuseScreen() {
 
   const load = useCallback(async () => {
     try {
+      setError(null);
       const [p, a] = await Promise.all([
         api.listProposals(),
-        api.getActivity(),
+        api.getActivity().catch(() => [] as ActivityEntry[]),
       ]);
       setProposals(p);
       setActivity(a);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load proposals.");
     } finally {
       setLoading(false);
     }
@@ -163,6 +172,8 @@ export default function MuseScreen() {
       if (approve) await api.approveProposal(id, mode);
       else await api.rejectProposal(id);
       await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Decision failed.");
     } finally {
       setBusyId(null);
     }
@@ -178,26 +189,17 @@ export default function MuseScreen() {
         <Muted>AI trade proposals</Muted>
       </View>
 
-      <Card style={styles.note}>
-        <Text style={styles.noteText}>
-          Muse proposes. You decide. Nothing executes without your approval,
-          and the kill switch in Settings blocks everything instantly.
-        </Text>
-      </Card>
-
-      {liveMode && (
-        <Card style={styles.warnCard}>
-          <Text style={styles.warnTitle}>Live approvals are stubs</Text>
-          <Muted>
-            Approving in live mode only marks the proposal approved. Actual
-            execution requires the backend, which is not wired yet.
-          </Muted>
-        </Card>
-      )}
-
       {loading ? (
         <View style={styles.center}>
           <ActivityIndicator color={theme.accent} />
+        </View>
+      ) : error && proposals.length === 0 ? (
+        <View style={styles.centerPad}>
+          <EmptyState
+            icon="cloud-offline-outline"
+            title="Could not load proposals"
+            message={error}
+          />
         </View>
       ) : (
         <FlatList
@@ -205,9 +207,17 @@ export default function MuseScreen() {
           keyExtractor={(p) => p.id}
           contentContainerStyle={styles.list}
           ListHeaderComponent={
-            <SectionTitle>
-              Pending proposals ({pending.length})
-            </SectionTitle>
+            <>
+              <Card style={styles.note}>
+                <Text style={styles.noteText}>
+                  Muse proposes. You decide. Nothing executes without your
+                  approval, and the kill switch in Settings blocks everything
+                  instantly.
+                </Text>
+              </Card>
+              {error ? <Text style={styles.inlineError}>{error}</Text> : null}
+              <SectionTitle>Pending proposals ({pending.length})</SectionTitle>
+            </>
           }
           renderItem={({ item }) => (
             <ProposalCard
@@ -219,17 +229,21 @@ export default function MuseScreen() {
             />
           )}
           ListEmptyComponent={
-            <Muted style={styles.empty}>
-              No proposals yet. New ideas from Muse will appear here.
-            </Muted>
+            <EmptyState
+              icon="sparkles-outline"
+              title="No proposals yet"
+              message="New ideas from Muse will appear here."
+            />
           }
           ListFooterComponent={
-            <>
-              <SectionTitle>Activity log</SectionTitle>
-              {activity.map((entry) => (
-                <ActivityRow key={entry.id} entry={entry} />
-              ))}
-            </>
+            activity.length > 0 ? (
+              <>
+                <SectionTitle>Activity log</SectionTitle>
+                {activity.map((entry) => (
+                  <ActivityRow key={entry.id} entry={entry} />
+                ))}
+              </>
+            ) : null
           }
         />
       )}
@@ -239,18 +253,21 @@ export default function MuseScreen() {
 
 const styles = StyleSheet.create({
   safe: { backgroundColor: theme.bg, flex: 1 },
-  header: { paddingHorizontal: 16, paddingTop: 12 },
-  title: { color: theme.text, fontSize: 24, fontWeight: "800" },
-  note: { margin: 16, marginBottom: 4 },
+  header: { paddingHorizontal: 20, paddingTop: 12 },
+  title: { color: theme.text, fontSize: 26, fontWeight: "800" },
+  note: { marginBottom: 4, marginTop: 12 },
   noteText: { color: theme.text, fontSize: 14, lineHeight: 20 },
-  warnCard: { borderColor: theme.amber, marginHorizontal: 16, marginTop: 12 },
-  warnTitle: {
-    color: theme.amber,
-    fontSize: 15,
-    fontWeight: "700",
-    marginBottom: 4,
+  inlineError: {
+    backgroundColor: "#3A1720",
+    borderRadius: theme.radiusSm,
+    color: theme.danger,
+    fontSize: 13,
+    fontWeight: "600",
+    marginTop: 12,
+    padding: 10,
   },
   center: { alignItems: "center", flex: 1, justifyContent: "center" },
+  centerPad: { flex: 1, paddingHorizontal: 24 },
   list: { padding: 16, paddingTop: 8 },
   proposalCard: { marginBottom: 12 },
   proposalHeader: {
@@ -266,14 +283,14 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginTop: 10,
   },
-  actions: { flexDirection: "row", gap: 10, marginTop: 12 },
+  actions: { flexDirection: "row", gap: 10, marginTop: 14 },
   action: {
     alignItems: "center",
-    borderRadius: 10,
+    borderRadius: theme.radiusSm,
     flex: 1,
-    paddingVertical: 12,
+    paddingVertical: 13,
   },
-  approve: { backgroundColor: "#14532D" },
+  approve: { backgroundColor: "#0E5C44" },
   reject: { backgroundColor: "#3A1720" },
   actionDisabled: { opacity: 0.4 },
   actionText: { color: "#FFFFFF", fontSize: 15, fontWeight: "700" },
@@ -284,7 +301,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
   },
-  statusExecuted: { backgroundColor: "#12331F" },
+  statusExecuted: { backgroundColor: "#0E2E25" },
   statusRejected: { backgroundColor: "#3A1720" },
   statusApproved: { backgroundColor: "#3A2E12" },
   statusText: { color: theme.text, fontSize: 11, fontWeight: "800" },
@@ -302,5 +319,4 @@ const styles = StyleSheet.create({
   },
   activityText: { flex: 1, gap: 2 },
   activityMessage: { color: theme.text, fontSize: 14, lineHeight: 20 },
-  empty: { marginTop: 24, textAlign: "center" },
 });

@@ -1,10 +1,10 @@
 /**
- * Settings tab: trading mode, guardrails, kill switch, backend URL.
+ * Settings tab: profile, trading mode, guardrails, kill switch, backend.
  * Live mode is hard gated: choosing it opens a risk disclosure sheet,
  * and the mode stays PAPER until the backend enables live trading.
  */
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import {
   Modal,
   ScrollView,
@@ -16,9 +16,13 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { router, useFocusEffect } from "expo-router";
 import { useAppState } from "../../lib/store";
+import { useAuth } from "../../lib/auth";
+import { api, type Profile } from "../../lib/api";
 import {
   Card,
+  Field,
   Muted,
   PrimaryButton,
   SectionTitle,
@@ -95,6 +99,120 @@ function RiskDisclosureSheet({
   );
 }
 
+function ProfileSection() {
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [street, setStreet] = useState("");
+  const [city, setCity] = useState("");
+  const [state, setState] = useState("");
+  const [zip, setZip] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setError(null);
+      const p = await api.getProfile();
+      setProfile(p);
+      setName(p.name);
+      setPhone(p.phone);
+      setStreet(p.addressStreet);
+      setCity(p.addressCity);
+      setState(p.addressState);
+      setZip(p.addressZip);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load profile.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load])
+  );
+
+  const save = async () => {
+    setFeedback(null);
+    setError(null);
+    setSaving(true);
+    try {
+      const p = await api.updateProfile({
+        name: name.trim(),
+        phone: phone.trim(),
+        addressStreet: street.trim(),
+        addressCity: city.trim(),
+        addressState: state.trim().toUpperCase(),
+        addressZip: zip.trim(),
+      });
+      setProfile(p);
+      setFeedback("Profile saved.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save profile.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return <Muted>Loading profile...</Muted>;
+
+  return (
+    <Card>
+      {error ? <Text style={styles.inlineError}>{error}</Text> : null}
+      {feedback ? <Text style={styles.inlineOk}>{feedback}</Text> : null}
+      <Field label="Full name" value={name} onChangeText={setName} autoCapitalize="words" />
+      <Field
+        label="Email"
+        value={profile?.email ?? ""}
+        editable={false}
+        autoCapitalize="none"
+      />
+      <Field
+        label="Phone"
+        value={phone}
+        onChangeText={setPhone}
+        keyboardType="phone-pad"
+      />
+      <Field
+        label="Street address"
+        value={street}
+        onChangeText={setStreet}
+        autoCapitalize="words"
+      />
+      <View style={styles.addrRow}>
+        <View style={styles.addrCity}>
+          <Field label="City" value={city} onChangeText={setCity} autoCapitalize="words" />
+        </View>
+        <View style={styles.addrState}>
+          <Field
+            label="State"
+            value={state}
+            onChangeText={(t) =>
+              setState(t.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2))
+            }
+            maxLength={2}
+            autoCapitalize="characters"
+          />
+        </View>
+        <View style={styles.addrZip}>
+          <Field
+            label="ZIP"
+            value={zip}
+            onChangeText={setZip}
+            keyboardType="number-pad"
+            maxLength={10}
+          />
+        </View>
+      </View>
+      <PrimaryButton title="Save profile" onPress={save} loading={saving} />
+    </Card>
+  );
+}
+
 export default function SettingsScreen() {
   const {
     mode,
@@ -107,12 +225,14 @@ export default function SettingsScreen() {
     setBackendUrlValue,
     setBackendKeyValue,
   } = useAppState();
+  const { user, signOut } = useAuth();
   const [sheetVisible, setSheetVisible] = useState(false);
   const [maxPosition, setMaxPosition] = useState(
     String(guardrails.maxPositionSize)
   );
   const [maxLoss, setMaxLoss] = useState(String(guardrails.maxDailyLoss));
   const [saved, setSaved] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const saveGuardrails = () => {
     const pos = parseFloat(maxPosition);
@@ -125,10 +245,26 @@ export default function SettingsScreen() {
     setTimeout(() => setSaved(false), 2000);
   };
 
+  const onLogout = async () => {
+    setLoggingOut(true);
+    try {
+      await signOut();
+      router.replace("/(auth)/welcome");
+    } finally {
+      setLoggingOut(false);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.title}>Settings</Text>
+        {user?.email ? (
+          <Muted style={styles.accountLine}>Signed in as {user.email}</Muted>
+        ) : null}
+
+        <SectionTitle>Profile</SectionTitle>
+        <ProfileSection />
 
         <SectionTitle>Trading mode</SectionTitle>
         <View style={styles.segmented}>
@@ -191,7 +327,7 @@ export default function SettingsScreen() {
           />
           <Muted style={styles.hint}>
             Orders above {formatMoney(guardrails.maxPositionSize)} are blocked
-            on the Trade tab.
+            by the backend as well.
           </Muted>
         </Card>
 
@@ -208,7 +344,7 @@ export default function SettingsScreen() {
             <Switch
               value={guardrails.killSwitch}
               onValueChange={(v) => updateGuardrails({ killSwitch: v })}
-              trackColor={{ false: theme.border, true: theme.red }}
+              trackColor={{ false: theme.border, true: theme.danger }}
               thumbColor="#FFFFFF"
             />
           </View>
@@ -238,15 +374,23 @@ export default function SettingsScreen() {
             secureTextEntry
           />
           <Muted>
-            Used when the real backend replaces the mock layer. Broker API
-            keys are never stored in this app.
+            Sent with every backend request. Broker API keys are never stored
+            in this app.
           </Muted>
         </Card>
 
+        <SectionTitle>Account</SectionTitle>
+        <PrimaryButton
+          title="Log out"
+          onPress={onLogout}
+          loading={loggingOut}
+          danger
+        />
+
         <SectionTitle>About</SectionTitle>
         <Card>
-          <Muted>TradingApp 0.1.0 (scaffold)</Muted>
-          <Muted>Paper trading only. Mock data. No real money.</Muted>
+          <Muted>TradeMuse 0.1.0</Muted>
+          <Muted>Paper trading only. No real money.</Muted>
         </Card>
       </ScrollView>
 
@@ -260,13 +404,9 @@ export default function SettingsScreen() {
 
 const styles = StyleSheet.create({
   safe: { backgroundColor: theme.bg, flex: 1 },
-  scroll: { padding: 16, paddingBottom: 32 },
-  title: {
-    color: theme.text,
-    fontSize: 24,
-    fontWeight: "800",
-    marginBottom: 12,
-  },
+  scroll: { padding: 20, paddingBottom: 40 },
+  title: { color: theme.text, fontSize: 26, fontWeight: "800" },
+  accountLine: { marginTop: 4 },
   segmented: {
     backgroundColor: theme.surface,
     borderColor: theme.border,
@@ -290,7 +430,7 @@ const styles = StyleSheet.create({
   input: {
     backgroundColor: theme.surface2,
     borderColor: theme.border,
-    borderRadius: 10,
+    borderRadius: theme.radiusSm,
     borderWidth: 1,
     color: theme.text,
     fontSize: 16,
@@ -299,7 +439,29 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   hint: { marginTop: 10 },
-  killOn: { borderColor: theme.red },
+  inlineError: {
+    backgroundColor: "#3A1720",
+    borderRadius: theme.radiusSm,
+    color: theme.danger,
+    fontSize: 13,
+    fontWeight: "600",
+    marginBottom: 12,
+    padding: 10,
+  },
+  inlineOk: {
+    backgroundColor: "#0E2E25",
+    borderRadius: theme.radiusSm,
+    color: theme.accent,
+    fontSize: 13,
+    fontWeight: "600",
+    marginBottom: 12,
+    padding: 10,
+  },
+  addrRow: { flexDirection: "row", gap: 10 },
+  addrCity: { flex: 2 },
+  addrState: { flex: 1 },
+  addrZip: { flex: 1.2 },
+  killOn: { borderColor: theme.danger },
   killRow: { alignItems: "center", flexDirection: "row", gap: 12 },
   killText: { flex: 1, gap: 4 },
   killTitle: { color: theme.text, fontSize: 15, fontWeight: "700" },
@@ -339,7 +501,7 @@ const styles = StyleSheet.create({
     width: 26,
   },
   checkboxOn: { backgroundColor: theme.accent, borderColor: theme.accent },
-  checkmark: { color: "#FFFFFF", fontWeight: "800" },
+  checkmark: { color: "#06281F", fontWeight: "800" },
   checkLabel: { color: theme.text, flex: 1, fontSize: 14, lineHeight: 20 },
   sheetCancel: { alignItems: "center", marginTop: 12, paddingVertical: 8 },
   sheetCancelText: { color: theme.muted, fontSize: 15, fontWeight: "600" },

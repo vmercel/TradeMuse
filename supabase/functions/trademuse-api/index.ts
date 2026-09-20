@@ -2,15 +2,21 @@
 // verify_jwt=false. Every request must carry header x-trademuse-key equal
 // to the TRADEMUSE_API_KEY function secret. JSON body: {action, ...params}.
 //
+// Optional per-user auth: pass "Authorization: Bearer <supabase_user_jwt>".
+// The token is validated against GoTrue (auth/v1/user). Invalid/expired
+// tokens get 401. When a valid JWT is present, settings and proposals are
+// scoped to that user; without one, the legacy global behavior is kept.
+//
 // Actions: settings_get, settings_update, account, positions, orders,
 // quotes, proposal_create, proposal_list, proposal_approve, proposal_reject,
-// order_place.
+// order_place, profile_get, profile_update.
 //
 // Paper trading only until live is explicitly enabled. Live order placement
 // is hard-gated server side and can never fire without live_enabled=true.
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") || "";
 const API_KEY = Deno.env.get("TRADEMUSE_API_KEY") || "";
 const APCA_ID = Deno.env.get("APCA_API_KEY_ID") || "";
 const APCA_SECRET = Deno.env.get("APCA_API_SECRET_KEY") || "";
@@ -19,7 +25,7 @@ const ALPACA_DATA = "https://data.alpaca.markets";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "content-type, x-trademuse-key",
+  "Access-Control-Allow-Headers": "content-type, x-trademuse-key, authorization",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -51,16 +57,75 @@ async function sb(path, method, body) {
   return data;
 }
 
+// Validate an optional user JWT against GoTrue.
+// Returns the user object when a Bearer token is present and valid,
+// null when no token is supplied, throws 401 when the token is invalid.
+async function getUserFromJwt(req) {
+  const auth = req.headers.get("authorization") || "";
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (!m) return null;
+  const token = m[1].trim();
+  if (!token || !ANON_KEY) {
+    throw { status: 401, code: "invalid_token", message: "Invalid or expired session. Please sign in again." };
+  }
+  let res;
+  try {
+    res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: ANON_KEY, Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    throw { status: 503, code: "auth_unavailable", message: "Could not validate session. Try again." };
+  }
+  if (!res.ok) {
+    throw { status: 401, code: "invalid_token", message: "Invalid or expired session. Please sign in again." };
+  }
+  const user = await res.json();
+  if (!user || !user.id) {
+    throw { status: 401, code: "invalid_token", message: "Invalid session. Please sign in again." };
+  }
+  return user;
+}
+
+const DEFAULT_SETTINGS = {
+  mode: "paper",
+  live_enabled: false,
+  max_position_usd: 1000,
+  max_daily_loss_usd: 200,
+  kill_switch: false,
+};
+
+// Legacy global settings row (no JWT).
 async function getSettings() {
   const rows = await sb("trademuse_settings?id=eq.1", "GET");
   if (!rows || rows.length === 0) throw { status: 500, code: "db_error", message: "Settings row missing" };
   return rows[0];
 }
 
-async function logActivity(kind, summary, detail) {
+// Per-user settings row. Creates the default row if the signup trigger missed it.
+async function getSettingsFor(uid) {
+  if (!uid) return getSettings();
+  const rows = await sb(`trademuse_settings?user_id=eq.${encodeURIComponent(uid)}`, "GET");
+  if (rows && rows.length > 0) return rows[0];
+  const created = await sb("trademuse_settings", "POST", { user_id: uid, ...DEFAULT_SETTINGS });
+  if (!created || created.length === 0) throw { status: 500, code: "db_error", message: "Could not create user settings" };
+  return created[0];
+}
+
+function settingsSelector(uid) {
+  return uid ? `user_id=eq.${encodeURIComponent(uid)}` : "id=eq.1";
+}
+
+async function logActivity(kind, summary, detail, userId) {
   try {
-    await sb("trademuse_activity", "POST", { kind, summary, detail: detail || {} });
+    const row = { kind, summary, detail: detail || {} };
+    if (userId) row.user_id = userId;
+    await sb("trademuse_activity", "POST", row);
   } catch { /* activity logging must never break the main flow */ }
+}
+
+function requireUser(ctx) {
+  if (!ctx || !ctx.uid) throw { status: 401, code: "auth_required", message: "Sign in is required for this action." };
+  return ctx.uid;
 }
 
 // ---------- Alpaca ----------
@@ -144,27 +209,43 @@ function validateOrderInput(p) {
   return { symbol, side, qty, orderType, limitPrice };
 }
 
-async function placeOrderCore(p) {
+async function placeOrderCore(p, uid) {
   const v = validateOrderInput(p);
-  const s = await getSettings();
+  const s = await getSettingsFor(uid);
   const g = await checkGuards(s, v.symbol, v.side, v.qty, v.orderType, v.limitPrice);
   if (!g.ok) {
-    await logActivity("order_rejected", `Order rejected: ${v.side} ${v.qty} ${v.symbol}`, { ...v, reason: g.code, message: g.message, mode: s.mode });
+    await logActivity("order_rejected", `Order rejected: ${v.side} ${v.qty} ${v.symbol}`, { ...v, reason: g.code, message: g.message, mode: s.mode }, uid);
     return { rejected: true, code: g.code, message: g.message };
   }
   const orderBody = { symbol: v.symbol, qty: String(v.qty), side: v.side, type: v.orderType, time_in_force: "day" };
   if (v.orderType === "limit") orderBody.limit_price = String(v.limitPrice);
   const order = await alpaca("/v2/orders", "POST", orderBody);
-  await logActivity("order_placed", `${v.side} ${v.qty} ${v.symbol} ${v.orderType} placed (${s.mode})`, { ...v, price: g.price, alpaca_order_id: order && order.id, mode: s.mode });
+  await logActivity("order_placed", `${v.side} ${v.qty} ${v.symbol} ${v.orderType} placed (${s.mode})`, { ...v, price: g.price, alpaca_order_id: order && order.id, mode: s.mode }, uid);
   return { rejected: false, order };
+}
+
+function validateProfileInput(p) {
+  const name = String(p.name || "").trim();
+  const phoneDigits = String(p.phone || "").replace(/\D/g, "");
+  const street = String(p.address_street || "").trim();
+  const city = String(p.address_city || "").trim();
+  const state = String(p.address_state || "").trim();
+  const zip = String(p.address_zip || "").trim();
+  if (!name || name.length > 120) throw { status: 400, code: "bad_name", message: "Name is required (max 120 characters)." };
+  if (!/^\d{7,15}$/.test(phoneDigits)) throw { status: 400, code: "bad_phone", message: "Phone must contain 7 to 15 digits." };
+  if (!street) throw { status: 400, code: "bad_address", message: "Street address is required." };
+  if (!city) throw { status: 400, code: "bad_address", message: "City is required." };
+  if (!state) throw { status: 400, code: "bad_address", message: "State is required." };
+  if (!zip) throw { status: 400, code: "bad_address", message: "ZIP/postal code is required." };
+  return { name, phone: phoneDigits, address_street: street, address_city: city, address_state: state, address_zip: zip };
 }
 
 // ---------- Actions ----------
 const actions = {
-  settings_get: async () => ok({ settings: await getSettings() }),
+  settings_get: async (p, ctx) => ok({ settings: await getSettingsFor(ctx.uid) }),
 
-  settings_update: async (p) => {
-    const s = await getSettings();
+  settings_update: async (p, ctx) => {
+    const s = await getSettingsFor(ctx.uid);
     const patch = {};
     if (p.mode !== undefined) {
       if (p.mode !== "paper" && p.mode !== "live") throw { status: 400, code: "bad_mode", message: "Mode must be paper or live." };
@@ -193,7 +274,7 @@ const actions = {
     }
     if (Object.keys(patch).length === 0) return ok({ settings: s });
     patch.updated_at = new Date().toISOString();
-    const rows = await sb("trademuse_settings?id=eq.1", "PATCH", patch);
+    const rows = await sb(`trademuse_settings?${settingsSelector(ctx.uid)}`, "PATCH", patch);
     return ok({ settings: rows[0] });
   },
 
@@ -218,63 +299,85 @@ const actions = {
     }
   },
 
-  proposal_create: async (p) => {
+  profile_get: async (p, ctx) => {
+    const uid = requireUser(ctx);
+    const rows = await sb(`trademuse_profiles?id=eq.${encodeURIComponent(uid)}`, "GET");
+    if (!rows || rows.length === 0) throw { status: 404, code: "not_found", message: "Profile not found." };
+    return ok({ profile: rows[0] });
+  },
+
+  profile_update: async (p, ctx) => {
+    const uid = requireUser(ctx);
+    const v = validateProfileInput(p);
+    const rows = await sb(`trademuse_profiles?id=eq.${encodeURIComponent(uid)}`, "PATCH", v);
+    if (!rows || rows.length === 0) throw { status: 404, code: "not_found", message: "Profile not found." };
+    return ok({ profile: rows[0] });
+  },
+
+  proposal_create: async (p, ctx) => {
     const v = validateOrderInput(p);
     const confidence = p.confidence === undefined ? 50 : Number(p.confidence);
     if (!(confidence >= 0 && confidence <= 100)) throw { status: 400, code: "bad_confidence", message: "Confidence must be 0 to 100." };
-    const rows = await sb("trademuse_proposals", "POST", {
+    const row = {
       symbol: v.symbol, side: v.side, qty: v.qty, order_type: v.orderType,
       limit_price: v.limitPrice, rationale: String(p.rationale || ""), confidence,
-    });
+    };
+    if (ctx.uid) row.user_id = ctx.uid;
+    const rows = await sb("trademuse_proposals", "POST", row);
     const proposal = rows[0];
-    await logActivity("proposal_created", `Proposal: ${v.side} ${v.qty} ${v.symbol} (${v.orderType})`, { proposal_id: proposal.id, ...v, confidence });
+    await logActivity("proposal_created", `Proposal: ${v.side} ${v.qty} ${v.symbol} (${v.orderType})`, { proposal_id: proposal.id, ...v, confidence }, ctx.uid);
     return ok({ proposal });
   },
 
-  proposal_list: async () => {
-    const rows = await sb("trademuse_proposals?order=created_at.desc&limit=100", "GET");
+  proposal_list: async (p, ctx) => {
+    const scope = ctx.uid ? `user_id=eq.${encodeURIComponent(ctx.uid)}&` : "";
+    const rows = await sb(`trademuse_proposals?${scope}order=created_at.desc&limit=100`, "GET");
     const rank = { pending: 0, approved: 1, executed: 2, failed: 3, rejected: 4 };
     rows.sort((a, b) => (rank[a.status] ?? 5) - (rank[b.status] ?? 5));
     return ok({ proposals: rows });
   },
 
-  proposal_approve: async (p) => {
+  proposal_approve: async (p, ctx) => {
     if (!p.id) throw { status: 400, code: "bad_id", message: "Proposal id is required." };
-    const rows = await sb(`trademuse_proposals?id=eq.${encodeURIComponent(p.id)}`, "GET");
+    const scope = ctx.uid ? `&user_id=eq.${encodeURIComponent(ctx.uid)}` : "";
+    const idSel = `id=eq.${encodeURIComponent(p.id)}`;
+    const rows = await sb(`trademuse_proposals?${idSel}${scope}`, "GET");
     const prop = rows && rows[0];
     if (!prop) throw { status: 404, code: "not_found", message: "Proposal not found." };
     if (prop.status !== "pending") throw { status: 400, code: "bad_status", message: `Proposal is ${prop.status}, only pending proposals can be approved.` };
-    const decided = await sb(`trademuse_proposals?id=eq.${encodeURIComponent(p.id)}`, "PATCH", { status: "approved", decided_at: new Date().toISOString() });
-    await logActivity("proposal_approved", `Approved: ${prop.side} ${prop.qty} ${prop.symbol}`, { proposal_id: prop.id });
+    const decided = await sb(`trademuse_proposals?${idSel}`, "PATCH", { status: "approved", decided_at: new Date().toISOString() });
+    await logActivity("proposal_approved", `Approved: ${prop.side} ${prop.qty} ${prop.symbol}`, { proposal_id: prop.id }, ctx.uid);
     try {
-      const r = await placeOrderCore({ symbol: prop.symbol, side: prop.side, qty: prop.qty, order_type: prop.order_type, limit_price: prop.limit_price });
+      const r = await placeOrderCore({ symbol: prop.symbol, side: prop.side, qty: prop.qty, order_type: prop.order_type, limit_price: prop.limit_price }, ctx.uid);
       if (r.rejected) {
-        const f = await sb(`trademuse_proposals?id=eq.${encodeURIComponent(p.id)}`, "PATCH", { status: "failed", note: r.message });
+        const f = await sb(`trademuse_proposals?${idSel}`, "PATCH", { status: "failed", note: r.message });
         return ok({ proposal: f[0], result: "rejected", code: r.code, message: r.message });
       }
-      const e = await sb(`trademuse_proposals?id=eq.${encodeURIComponent(p.id)}`, "PATCH", { status: "executed", alpaca_order_id: r.order && r.order.id });
+      const e = await sb(`trademuse_proposals?${idSel}`, "PATCH", { status: "executed", alpaca_order_id: r.order && r.order.id });
       return ok({ proposal: e[0], result: "executed", order: r.order });
     } catch (e) {
       const msg = (e && e.message) || "Order placement failed.";
-      const f = await sb(`trademuse_proposals?id=eq.${encodeURIComponent(p.id)}`, "PATCH", { status: "failed", note: msg });
-      await logActivity("order_rejected", `Approved proposal failed: ${prop.symbol}`, { proposal_id: prop.id, message: msg });
+      const f = await sb(`trademuse_proposals?${idSel}`, "PATCH", { status: "failed", note: msg });
+      await logActivity("order_rejected", `Approved proposal failed: ${prop.symbol}`, { proposal_id: prop.id, message: msg }, ctx.uid);
       return ok({ proposal: f[0], result: "failed", message: msg });
     }
   },
 
-  proposal_reject: async (p) => {
+  proposal_reject: async (p, ctx) => {
     if (!p.id) throw { status: 400, code: "bad_id", message: "Proposal id is required." };
-    const rows = await sb(`trademuse_proposals?id=eq.${encodeURIComponent(p.id)}`, "GET");
+    const scope = ctx.uid ? `&user_id=eq.${encodeURIComponent(ctx.uid)}` : "";
+    const idSel = `id=eq.${encodeURIComponent(p.id)}`;
+    const rows = await sb(`trademuse_proposals?${idSel}${scope}`, "GET");
     const prop = rows && rows[0];
     if (!prop) throw { status: 404, code: "not_found", message: "Proposal not found." };
     if (prop.status !== "pending") throw { status: 400, code: "bad_status", message: `Proposal is ${prop.status}, only pending proposals can be rejected.` };
-    const r = await sb(`trademuse_proposals?id=eq.${encodeURIComponent(p.id)}`, "PATCH", { status: "rejected", decided_at: new Date().toISOString(), note: String(p.note || "") });
-    await logActivity("proposal_rejected", `Rejected: ${prop.side} ${prop.qty} ${prop.symbol}`, { proposal_id: prop.id });
+    const r = await sb(`trademuse_proposals?${idSel}`, "PATCH", { status: "rejected", decided_at: new Date().toISOString(), note: String(p.note || "") });
+    await logActivity("proposal_rejected", `Rejected: ${prop.side} ${prop.qty} ${prop.symbol}`, { proposal_id: prop.id }, ctx.uid);
     return ok({ proposal: r[0] });
   },
 
-  order_place: async (p) => {
-    const r = await placeOrderCore(p);
+  order_place: async (p, ctx) => {
+    const r = await placeOrderCore(p, ctx.uid);
     if (r.rejected) return bad(422, r.code, r.message);
     return ok({ order: r.order });
   },
@@ -286,12 +389,19 @@ Deno.serve(async (req) => {
   if (!API_KEY || req.headers.get("x-trademuse-key") !== API_KEY) {
     return bad(401, "unauthorized", "Missing or invalid x-trademuse-key.");
   }
+  let user = null;
+  try {
+    user = await getUserFromJwt(req);
+  } catch (e) {
+    return bad(e.status || 401, e.code || "invalid_token", e.message || "Invalid session.");
+  }
+  const ctx = { uid: user ? user.id : null };
   let body;
   try { body = await req.json(); } catch { return bad(400, "invalid_json", "Request body must be JSON."); }
   const fn = actions[body && body.action];
   if (!fn) return bad(400, "bad_action", `Unknown action: ${body && body.action}.`);
   try {
-    return await fn(body);
+    return await fn(body, ctx);
   } catch (e) {
     if (e && e.status) return bad(e.status, e.code || "error", e.message || "Request failed.");
     return bad(500, "internal_error", "Unexpected error.");

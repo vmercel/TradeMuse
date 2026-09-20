@@ -1,6 +1,6 @@
 /**
  * Trade tab: manual order ticket.
- * Paper mode executes against the mock layer. Live mode is hard gated:
+ * Paper mode executes through the backend. Live mode is hard gated:
  * the confirm button is inert until the backend enables live trading.
  */
 
@@ -11,8 +11,6 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
-  TouchableOpacity,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -20,45 +18,15 @@ import { api, type Order, type OrderType, type Side } from "../../lib/api";
 import { useAppState } from "../../lib/store";
 import {
   Card,
+  Field,
   Muted,
   PrimaryButton,
   SectionTitle,
+  SegmentedControl,
   formatMoney,
+  moneyText,
   theme,
 } from "../../components/ui";
-
-function Segmented<T extends string>({
-  options,
-  value,
-  onChange,
-  labels,
-}: {
-  options: T[];
-  value: T;
-  onChange: (v: T) => void;
-  labels?: Partial<Record<T, string>>;
-}) {
-  return (
-    <View style={styles.segmented}>
-      {options.map((opt) => {
-        const active = opt === value;
-        return (
-          <TouchableOpacity
-            key={opt}
-            style={[styles.segment, active && styles.segmentActive]}
-            onPress={() => onChange(opt)}
-          >
-            <Text
-              style={[styles.segmentText, active && styles.segmentTextActive]}
-            >
-              {labels?.[opt] ?? opt}
-            </Text>
-          </TouchableOpacity>
-        );
-      })}
-    </View>
-  );
-}
 
 export default function TradeScreen() {
   const { mode, guardrails } = useAppState();
@@ -74,7 +42,7 @@ export default function TradeScreen() {
   const liveMode = mode === "live";
   const killSwitchOn = guardrails.killSwitch;
 
-  const qtyNum = useMemo(() => parseInt(qty, 10), [qty]);
+  const qtyNum = useMemo(() => parseFloat(qty), [qty]);
   const limitNum = useMemo(() => parseFloat(limitPrice), [limitPrice]);
   const cleanSymbol = symbol.trim().toUpperCase();
 
@@ -136,7 +104,10 @@ export default function TradeScreen() {
         style={styles.flex}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        <ScrollView contentContainerStyle={styles.scroll}>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={styles.header}>
             <Text style={styles.title}>Trade</Text>
             <View
@@ -148,7 +119,7 @@ export default function TradeScreen() {
               <Text
                 style={[
                   styles.modeText,
-                  { color: liveMode ? theme.red : theme.green },
+                  { color: liveMode ? theme.danger : theme.accent },
                 ]}
               >
                 {liveMode ? "LIVE (DISABLED)" : "PAPER TRADING"}
@@ -177,7 +148,7 @@ export default function TradeScreen() {
           )}
 
           <SectionTitle>Side</SectionTitle>
-          <Segmented<Side>
+          <SegmentedControl<Side>
             options={["buy", "sell"]}
             value={side}
             onChange={setSide}
@@ -185,28 +156,24 @@ export default function TradeScreen() {
           />
 
           <SectionTitle>Symbol</SectionTitle>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. AAPL"
-            placeholderTextColor={theme.muted}
+          <Field
             value={symbol}
             onChangeText={setSymbol}
+            placeholder="e.g. AAPL"
             autoCapitalize="characters"
             autoCorrect={false}
           />
 
-          <SectionTitle>Quantity (shares)</SectionTitle>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. 10"
-            placeholderTextColor={theme.muted}
+          <SectionTitle>Quantity</SectionTitle>
+          <Field
             value={qty}
             onChangeText={setQty}
-            keyboardType="number-pad"
+            placeholder="e.g. 10 (fractional allowed)"
+            keyboardType="decimal-pad"
           />
 
           <SectionTitle>Order type</SectionTitle>
-          <Segmented<OrderType>
+          <SegmentedControl<OrderType>
             options={["market", "limit"]}
             value={orderType}
             onChange={setOrderType}
@@ -216,12 +183,10 @@ export default function TradeScreen() {
           {orderType === "limit" && (
             <>
               <SectionTitle>Limit price</SectionTitle>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g. 230.00"
-                placeholderTextColor={theme.muted}
+              <Field
                 value={limitPrice}
                 onChangeText={setLimitPrice}
+                placeholder="e.g. 230.00"
                 keyboardType="decimal-pad"
               />
             </>
@@ -245,10 +210,8 @@ export default function TradeScreen() {
             </View>
             <View style={styles.previewRow}>
               <Muted>Estimated value</Muted>
-              <Text style={styles.previewValue}>
-                {estimatedValue > 0
-                  ? formatMoney(estimatedValue)
-                  : "Priced at fill"}
+              <Text style={[styles.previewValue, moneyText]}>
+                {estimatedValue > 0 ? formatMoney(estimatedValue) : "Priced at fill"}
               </Text>
             </View>
             <View style={styles.previewRow}>
@@ -256,7 +219,8 @@ export default function TradeScreen() {
               <Text
                 style={[
                   styles.previewValue,
-                  exceedsPositionLimit && { color: theme.red },
+                  moneyText,
+                  exceedsPositionLimit && { color: theme.danger },
                 ]}
               >
                 {formatMoney(guardrails.maxPositionSize)}
@@ -269,35 +233,35 @@ export default function TradeScreen() {
 
           <PrimaryButton
             title={
-              submitting
-                ? "Placing order..."
-                : liveMode
-                  ? "Live trading disabled"
-                  : killSwitchOn
-                    ? "Blocked by kill switch"
-                    : `Confirm ${side === "buy" ? "Buy" : "Sell"} ${cleanSymbol || ""}`.trim()
+              liveMode
+                ? "Live trading disabled"
+                : killSwitchOn
+                  ? "Blocked by kill switch"
+                  : `Confirm ${side === "buy" ? "Buy" : "Sell"} ${cleanSymbol || ""}`.trim()
             }
             onPress={onConfirm}
             disabled={confirmDisabled}
+            loading={submitting}
             style={styles.confirm}
           />
 
           {confirmation && (
             <Card style={styles.confirmCard}>
-              <Text style={styles.confirmTitle}>Order confirmed (paper)</Text>
+              <Text style={styles.confirmTitle}>Order submitted</Text>
               <Muted>Order ID: {confirmation.id}</Muted>
               <Muted>
                 {confirmation.side === "buy" ? "Bought" : "Sold"}{" "}
-                {confirmation.qty} {confirmation.symbol} @{" "}
-                {formatMoney(confirmation.filledPrice ?? 0)}
+                {confirmation.qty} {confirmation.symbol}
+                {confirmation.filledPrice
+                  ? ` @ ${formatMoney(confirmation.filledPrice)}`
+                  : ""}
               </Muted>
               <Muted>Status: {confirmation.status}</Muted>
             </Card>
           )}
 
           <Muted style={styles.footnote}>
-            Paper mode only. No real money moves. Limit orders fill at your
-            limit price in this mock.
+            Paper mode only. No real money moves.
           </Muted>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -308,48 +272,24 @@ export default function TradeScreen() {
 const styles = StyleSheet.create({
   safe: { backgroundColor: theme.bg, flex: 1 },
   flex: { flex: 1 },
-  scroll: { padding: 16, paddingBottom: 32 },
+  scroll: { padding: 20, paddingBottom: 32 },
   header: {
     alignItems: "center",
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 12,
+    marginBottom: 8,
   },
-  title: { color: theme.text, fontSize: 24, fontWeight: "800" },
+  title: { color: theme.text, fontSize: 26, fontWeight: "800" },
   modeBadge: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
-  modeBadgePaper: { backgroundColor: "#12331F" },
+  modeBadgePaper: { backgroundColor: "#0E2E25" },
   modeBadgeLive: { backgroundColor: "#3A1720" },
   modeText: { fontSize: 11, fontWeight: "800" },
-  warnCard: { borderColor: theme.red, marginBottom: 12 },
+  warnCard: { borderColor: theme.danger, marginBottom: 12, marginTop: 8 },
   warnTitle: {
-    color: theme.red,
+    color: theme.danger,
     fontSize: 15,
     fontWeight: "700",
     marginBottom: 4,
-  },
-  segmented: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: theme.radius,
-    borderWidth: 1,
-    flexDirection: "row",
-    marginBottom: 16,
-    overflow: "hidden",
-  },
-  segment: { alignItems: "center", flex: 1, paddingVertical: 12 },
-  segmentActive: { backgroundColor: theme.surface2 },
-  segmentText: { color: theme.muted, fontSize: 15, fontWeight: "600" },
-  segmentTextActive: { color: theme.text, fontWeight: "700" },
-  input: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderRadius: theme.radius,
-    borderWidth: 1,
-    color: theme.text,
-    fontSize: 16,
-    marginBottom: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
   },
   previewRow: {
     flexDirection: "row",
@@ -357,11 +297,19 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   previewValue: { color: theme.text, fontSize: 14, fontWeight: "600" },
-  error: { color: theme.red, fontSize: 14, marginTop: 12 },
+  error: {
+    backgroundColor: "#3A1720",
+    borderRadius: theme.radiusSm,
+    color: theme.danger,
+    fontSize: 14,
+    fontWeight: "600",
+    marginTop: 12,
+    padding: 12,
+  },
   confirm: { marginTop: 20 },
-  confirmCard: { borderColor: theme.green, marginTop: 16 },
+  confirmCard: { borderColor: theme.accent, marginTop: 16 },
   confirmTitle: {
-    color: theme.green,
+    color: theme.accent,
     fontSize: 15,
     fontWeight: "700",
     marginBottom: 6,

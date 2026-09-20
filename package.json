@@ -1,10 +1,12 @@
 {
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",
+    "@supabase/supabase-js": "^2.116.0",
     "expo": "~57.0.24",
     "expo-constants": "~57.0.0",
     "expo-linking": "~57.0.0",
     "expo-router": "~57.0.22",
+    "expo-secure-store": "^57.0.4",
     "expo-status-bar": "~57.0.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",

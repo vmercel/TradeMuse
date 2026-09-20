@@ -1,6 +1,6 @@
 /**
- * Dashboard tab: portfolio snapshot and positions.
- * All data comes from the typed api client (mock layer for now).
+ * Dashboard tab: portfolio hero card and positions.
+ * All data comes from the typed api client (Supabase backend).
  */
 
 import { useCallback, useState } from "react";
@@ -19,10 +19,12 @@ import { useAppState } from "../../lib/store";
 import {
   Card,
   ChangePill,
+  EmptyState,
   Muted,
   SectionTitle,
   formatMoney,
   formatPercent,
+  moneyText,
   theme,
 } from "../../components/ui";
 
@@ -37,8 +39,16 @@ function PositionRow({ position }: { position: Position }) {
         </Muted>
       </View>
       <View style={styles.rowRight}>
-        <Text style={styles.value}>{formatMoney(position.marketValue)}</Text>
-        <Text style={[styles.pnl, { color: positive ? theme.green : theme.red }]}>
+        <Text style={[styles.value, moneyText]}>
+          {formatMoney(position.marketValue)}
+        </Text>
+        <Text
+          style={[
+            styles.pnl,
+            moneyText,
+            { color: positive ? theme.accent : theme.danger },
+          ]}
+        >
           {formatMoney(position.unrealizedPnL, true)} (
           {formatPercent(position.unrealizedPnLPercent)})
         </Text>
@@ -53,15 +63,19 @@ export default function DashboardScreen() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
+      setError(null);
       const [acct, pos] = await Promise.all([
         api.getAccount(mode),
         api.getPositions(mode),
       ]);
       setAccount(acct);
       setPositions(pos);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load portfolio.");
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -87,15 +101,24 @@ export default function DashboardScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>Portfolio</Text>
         <View style={styles.modeBadge}>
+          <View style={styles.modeDot} />
           <Text style={styles.modeText}>
-            {mode === "paper" ? "PAPER TRADING" : "LIVE"}
+            {mode === "paper" ? "PAPER" : "LIVE"}
           </Text>
         </View>
       </View>
 
-      {loading && !account ? (
+      {loading && !account && !error ? (
         <View style={styles.center}>
           <ActivityIndicator color={theme.accent} />
+        </View>
+      ) : error && !account ? (
+        <View style={styles.centerPad}>
+          <EmptyState
+            icon="cloud-offline-outline"
+            title="Could not load portfolio"
+            message={error}
+          />
         </View>
       ) : (
         <FlatList
@@ -111,24 +134,28 @@ export default function DashboardScreen() {
           }
           ListHeaderComponent={
             <>
-              <Card>
+              <Card style={styles.hero}>
                 <Muted>Total equity</Muted>
-                <Text style={styles.equity}>
+                <Text style={[styles.equity, moneyText]}>
                   {formatMoney(account?.equity ?? 0)}
                 </Text>
                 <View style={styles.statsRow}>
                   <View>
                     <Muted>Buying power</Muted>
-                    <Text style={styles.statValue}>
+                    <Text style={[styles.statValue, moneyText]}>
                       {formatMoney(account?.buyingPower ?? 0)}
                     </Text>
+                    <Muted style={styles.cashLine}>
+                      Cash {formatMoney(account?.cash ?? 0)}
+                    </Muted>
                   </View>
                   <View style={styles.dayPnl}>
                     <Muted>Day P&amp;L</Muted>
                     <Text
                       style={[
                         styles.statValue,
-                        { color: dayPositive ? theme.green : theme.red },
+                        moneyText,
+                        { color: dayPositive ? theme.accent : theme.danger },
                       ]}
                     >
                       {formatMoney(account?.dayPnL ?? 0, true)}
@@ -146,7 +173,11 @@ export default function DashboardScreen() {
             </Card>
           )}
           ListEmptyComponent={
-            <Muted style={styles.empty}>No open positions.</Muted>
+            <EmptyState
+              icon="briefcase-outline"
+              title="No open positions"
+              message="Approved trades will show up here."
+            />
           }
         />
       )}
@@ -160,42 +191,55 @@ const styles = StyleSheet.create({
     alignItems: "center",
     flexDirection: "row",
     justifyContent: "space-between",
-    paddingHorizontal: 16,
+    paddingHorizontal: 20,
     paddingVertical: 12,
   },
-  title: { color: theme.text, fontSize: 24, fontWeight: "800" },
+  title: { color: theme.text, fontSize: 26, fontWeight: "800" },
   modeBadge: {
-    backgroundColor: "#12331F",
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    alignItems: "center",
+    backgroundColor: theme.surface,
+    borderColor: theme.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
   },
-  modeText: { color: theme.green, fontSize: 11, fontWeight: "800" },
+  modeDot: {
+    backgroundColor: theme.accent,
+    borderRadius: 4,
+    height: 8,
+    width: 8,
+  },
+  modeText: { color: theme.text, fontSize: 11, fontWeight: "800" },
   center: { alignItems: "center", flex: 1, justifyContent: "center" },
+  centerPad: { flex: 1, paddingHorizontal: 24 },
   list: { padding: 16, paddingTop: 4 },
+  hero: { borderColor: theme.border, padding: 20 },
   equity: {
     color: theme.text,
-    fontSize: 34,
+    fontSize: 38,
     fontWeight: "800",
     marginVertical: 6,
   },
   statsRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginTop: 12,
+    marginTop: 14,
   },
-  statValue: { color: theme.text, fontSize: 16, fontWeight: "700", marginTop: 2 },
-  dayPnl: { alignItems: "flex-end", gap: 4 },
-  positionCard: { marginBottom: 10, paddingVertical: 12 },
+  statValue: { color: theme.text, fontSize: 17, fontWeight: "700", marginTop: 2 },
+  cashLine: { marginTop: 4 },
+  dayPnl: { alignItems: "flex-end", gap: 5 },
+  positionCard: { marginBottom: 10, paddingVertical: 14 },
   row: {
     alignItems: "center",
     flexDirection: "row",
     justifyContent: "space-between",
   },
-  rowLeft: { gap: 2 },
-  rowRight: { alignItems: "flex-end", gap: 2 },
-  symbol: { color: theme.text, fontSize: 16, fontWeight: "800" },
-  value: { color: theme.text, fontSize: 15, fontWeight: "700" },
+  rowLeft: { gap: 3 },
+  rowRight: { alignItems: "flex-end", gap: 3 },
+  symbol: { color: theme.text, fontSize: 17, fontWeight: "800" },
+  value: { color: theme.text, fontSize: 16, fontWeight: "700" },
   pnl: { fontSize: 13, fontWeight: "600" },
-  empty: { marginTop: 24, textAlign: "center" },
 });

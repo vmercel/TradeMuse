@@ -1,6 +1,6 @@
 /**
- * Markets tab: watchlist with live-style quotes, plus symbol search/add.
- * Mock layer for now; quotes will come from the backend later.
+ * Markets tab: watchlist with bid/ask quotes, plus symbol search/add.
+ * Quotes come from the backend; the watchlist is kept locally.
  */
 
 import { useCallback, useMemo, useState } from "react";
@@ -17,51 +17,66 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api, type Quote } from "../../lib/api";
-import {
-  addMockWatchlist,
-  getMockWatchlist,
-  knownSymbols,
-} from "../../lib/mockData";
+import { knownSymbols } from "../../lib/mockData";
 import {
   Card,
-  ChangePill,
+  EmptyState,
   Muted,
   SectionTitle,
   formatMoney,
+  moneyText,
   theme,
 } from "../../components/ui";
 
-function QuoteRow({ quote }: { quote: Quote }) {
-  const positive = quote.dayChangePercent >= 0;
+const DEFAULT_WATCHLIST = ["AAPL", "NVDA", "MSFT", "TSLA", "SPY"];
+
+function QuoteRow({
+  quote,
+  onRemove,
+}: {
+  quote: Quote;
+  onRemove: () => void;
+}) {
+  const bid = quote.bid ?? quote.lastPrice;
+  const ask = quote.ask ?? quote.lastPrice;
   return (
     <View style={styles.row}>
       <View style={styles.rowLeft}>
         <Text style={styles.symbol}>{quote.symbol}</Text>
-        <Muted>Vol {(quote.volume / 1_000_000).toFixed(1)}M</Muted>
+        <Muted>
+          Bid {formatMoney(bid)} / Ask {formatMoney(ask)}
+        </Muted>
       </View>
       <View style={styles.rowRight}>
-        <Text style={styles.price}>{formatMoney(quote.lastPrice)}</Text>
-        <ChangePill value={quote.dayChangePercent} />
+        <Text style={[styles.price, moneyText]}>{formatMoney(ask)}</Text>
+        <TouchableOpacity onPress={onRemove} hitSlop={10}>
+          <Ionicons name="remove-circle-outline" size={20} color={theme.muted} />
+        </TouchableOpacity>
       </View>
     </View>
   );
 }
 
 export default function MarketsScreen() {
-  const [watchlist, setWatchlist] = useState<string[]>([]);
+  const [watchlist, setWatchlist] = useState<string[]>(DEFAULT_WATCHLIST);
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const symbols = getMockWatchlist();
-      setWatchlist(symbols);
-      setQuotes(await api.getQuotes(symbols));
+      setError(null);
+      const next = await api.getQuotes(watchlist);
+      setQuotes(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load quotes.");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }, []);
+  }, [watchlist]);
 
   useFocusEffect(
     useCallback(() => {
@@ -75,17 +90,19 @@ export default function MarketsScreen() {
     if (q.length === 0) return [];
     return knownSymbols
       .filter(
-        (s) =>
-          s.symbol.includes(q) || s.name.toUpperCase().includes(q)
+        (s) => s.symbol.includes(q) || s.name.toUpperCase().includes(q)
       )
       .filter((s) => !watchlist.includes(s.symbol))
       .slice(0, 6);
   }, [query, watchlist]);
 
   const addSymbol = (symbol: string) => {
-    addMockWatchlist(symbol);
+    setWatchlist((w) => (w.includes(symbol) ? w : [...w, symbol]));
     setQuery("");
-    load();
+  };
+
+  const removeSymbol = (symbol: string) => {
+    setWatchlist((w) => w.filter((s) => s !== symbol));
   };
 
   return (
@@ -103,6 +120,7 @@ export default function MarketsScreen() {
           value={query}
           onChangeText={setQuery}
           autoCapitalize="characters"
+          autoCorrect={false}
         />
         {query.length > 0 && (
           <TouchableOpacity onPress={() => setQuery("")}>
@@ -133,21 +151,36 @@ export default function MarketsScreen() {
         <View style={styles.center}>
           <ActivityIndicator color={theme.accent} />
         </View>
+      ) : error && quotes.length === 0 ? (
+        <View style={styles.centerPad}>
+          <EmptyState
+            icon="cloud-offline-outline"
+            title="Could not load quotes"
+            message={error}
+          />
+        </View>
       ) : (
         <FlatList
           data={quotes}
           keyExtractor={(q) => q.symbol}
           contentContainerStyle={styles.list}
+          onRefresh={() => {
+            setRefreshing(true);
+            load();
+          }}
+          refreshing={refreshing}
           ListHeaderComponent={<SectionTitle>Watchlist</SectionTitle>}
           renderItem={({ item }) => (
             <Card style={styles.quoteCard}>
-              <QuoteRow quote={item} />
+              <QuoteRow quote={item} onRemove={() => removeSymbol(item.symbol)} />
             </Card>
           )}
           ListEmptyComponent={
-            <Muted style={styles.empty}>
-              Your watchlist is empty. Search above to add symbols.
-            </Muted>
+            <EmptyState
+              icon="stats-chart-outline"
+              title="Watchlist is empty"
+              message="Search above to add symbols."
+            />
           }
         />
       )}
@@ -157,8 +190,8 @@ export default function MarketsScreen() {
 
 const styles = StyleSheet.create({
   safe: { backgroundColor: theme.bg, flex: 1 },
-  header: { paddingHorizontal: 16, paddingVertical: 12 },
-  title: { color: theme.text, fontSize: 24, fontWeight: "800" },
+  header: { paddingHorizontal: 20, paddingVertical: 12 },
+  title: { color: theme.text, fontSize: 26, fontWeight: "800" },
   searchWrap: {
     alignItems: "center",
     backgroundColor: theme.surface,
@@ -190,16 +223,16 @@ const styles = StyleSheet.create({
     padding: 12,
   },
   center: { alignItems: "center", flex: 1, justifyContent: "center" },
+  centerPad: { flex: 1, paddingHorizontal: 24 },
   list: { padding: 16, paddingTop: 8 },
-  quoteCard: { marginBottom: 10, paddingVertical: 12 },
+  quoteCard: { marginBottom: 10, paddingVertical: 14 },
   row: {
     alignItems: "center",
     flexDirection: "row",
     justifyContent: "space-between",
   },
-  rowLeft: { gap: 2 },
-  rowRight: { alignItems: "flex-end", gap: 6 },
-  symbol: { color: theme.text, fontSize: 16, fontWeight: "800" },
-  price: { color: theme.text, fontSize: 15, fontWeight: "700" },
-  empty: { marginTop: 24, textAlign: "center" },
+  rowLeft: { gap: 3 },
+  rowRight: { alignItems: "center", flexDirection: "row", gap: 12 },
+  symbol: { color: theme.text, fontSize: 17, fontWeight: "800" },
+  price: { color: theme.text, fontSize: 16, fontWeight: "700" },
 });

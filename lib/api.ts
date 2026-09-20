@@ -34,6 +34,7 @@ import {
   logMockActivity,
   setMockProposalStatus,
 } from "./mockData";
+import { getAccessToken, supabase } from "./supabase";
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -94,6 +95,8 @@ export interface OrderInput {
 export interface Quote {
   symbol: string;
   lastPrice: number;
+  bid?: number;
+  ask?: number;
   dayChange: number;
   dayChangePercent: number;
   volume: number;
@@ -129,15 +132,29 @@ export interface Guardrails {
   killSwitch: boolean; // when true, all order placement is blocked
 }
 
+export interface Profile {
+  name: string;
+  email: string;
+  phone: string;
+  addressStreet: string;
+  addressCity: string;
+  addressState: string;
+  addressZip: string;
+}
+
 /* ------------------------------------------------------------------ */
 /* Client                                                              */
 /* ------------------------------------------------------------------ */
 
-/** Master switch. Keep true until the Supabase backend URL + key are set. */
-export const USE_MOCK = true;
+/** Master switch. Real Supabase backend is live; mock stays as fallback. */
+export const USE_MOCK = false;
 
-/** Base URL of the backend, configured in Settings. Unused while mocking. */
-export let BACKEND_URL = "";
+/** Default backend URL, prefilled in Settings. The API key is never hardcoded. */
+export const DEFAULT_BACKEND_URL =
+  "https://kprkjndaomrecoxwxkvi.supabase.co/functions/v1/trademuse-api";
+
+/** Base URL of the backend, configured in Settings. */
+export let BACKEND_URL = DEFAULT_BACKEND_URL;
 
 /** Backend API key (x-trademuse-key), configured in Settings. Never hardcoded. */
 export let BACKEND_KEY = "";
@@ -161,6 +178,102 @@ export interface TradingClient {
   rejectProposal(id: string): Promise<Proposal>;
   placeOrder(input: OrderInput, mode: Mode): Promise<Order>;
   getActivity(): Promise<ActivityEntry[]>;
+  getProfile(): Promise<Profile>;
+  updateProfile(patch: Partial<Profile>): Promise<Profile>;
+}
+
+/* ------------------------------------------------------------------ */
+/* Auth (Supabase Auth, sessions persisted in SecureStore)              */
+/* ------------------------------------------------------------------ */
+
+export interface SignupInput {
+  name: string;
+  email: string;
+  phone: string;
+  password: string;
+  addressStreet: string;
+  addressCity: string;
+  addressState: string;
+  addressZip: string;
+}
+
+function friendlyAuthError(message: string): string {
+  if (/email not confirmed/i.test(message))
+    return "Please verify your email with the 6-digit code we sent you.";
+  if (/invalid login credentials/i.test(message))
+    return "Incorrect email or password. Try again.";
+  if (/user already registered/i.test(message))
+    return "An account with this email already exists. Try logging in.";
+  if (/password.*weak|weak.*password/i.test(message))
+    return "That password is too weak. Use at least 8 characters.";
+  if (/otp.*expired|expired.*otp|token.*expired/i.test(message))
+    return "That code has expired. Request a new one.";
+  if (/invalid.*token|token.*invalid/i.test(message))
+    return "That code is not correct. Check and try again.";
+  return message;
+}
+
+/** Create the account. With email confirmation on, no session is returned;
+ * the user must verify the 6-digit OTP next. */
+export async function signUp(input: SignupInput): Promise<void> {
+  const { error } = await supabase.auth.signUp({
+    email: input.email.trim().toLowerCase(),
+    password: input.password,
+    options: {
+      data: {
+        name: input.name.trim(),
+        phone: input.phone.trim(),
+        address_street: input.addressStreet.trim(),
+        address_city: input.addressCity.trim(),
+        address_state: input.addressState.trim().toUpperCase(),
+        address_zip: input.addressZip.trim(),
+      },
+    },
+  });
+  if (error) throw new Error(friendlyAuthError(error.message));
+}
+
+/** Confirm the signup email with the 6-digit code. Creates the session. */
+export async function verifyOtp(email: string, code: string): Promise<void> {
+  const { error } = await supabase.auth.verifyOtp({
+    email: email.trim().toLowerCase(),
+    token: code.trim(),
+    type: "signup",
+  });
+  if (error) throw new Error(friendlyAuthError(error.message));
+}
+
+/** Resend the signup confirmation code (60s cooldown enforced in UI). */
+export async function resendOtp(email: string): Promise<void> {
+  const { error } = await supabase.auth.resend({
+    type: "signup",
+    email: email.trim().toLowerCase(),
+  });
+  if (error) throw new Error(friendlyAuthError(error.message));
+}
+
+export async function signIn(email: string, password: string): Promise<void> {
+  const { error } = await supabase.auth.signInWithPassword({
+    email: email.trim().toLowerCase(),
+    password,
+  });
+  if (error) throw new Error(friendlyAuthError(error.message));
+}
+
+/** Sign out and clear the persisted session. */
+export async function signOut(): Promise<void> {
+  const { error } = await supabase.auth.signOut();
+  if (error) throw new Error(friendlyAuthError(error.message));
+}
+
+/** The currently signed-in user, or null. */
+export async function getSessionUser(): Promise<{
+  id: string;
+  email?: string;
+} | null> {
+  const { data } = await supabase.auth.getSession();
+  const u = data.session?.user;
+  return u ? { id: u.id, email: u.email ?? undefined } : null;
 }
 
 async function latency(): Promise<void> {
@@ -175,6 +288,16 @@ function backendNotWired(method: string): Error {
     `Backend not wired: ${method} has no live implementation yet.`
   );
 }
+
+let mockProfile: Profile = {
+  name: "Demo Trader",
+  email: "demo@trademuse.app",
+  phone: "",
+  addressStreet: "",
+  addressCity: "",
+  addressState: "",
+  addressZip: "",
+};
 
 const mockApi: TradingClient = {
   async getAccount(mode: Mode): Promise<Account> {
@@ -310,6 +433,17 @@ const mockApi: TradingClient = {
     }
     throw backendNotWired("getActivity");
   },
+
+  async getProfile(): Promise<Profile> {
+    await latency();
+    return { ...mockProfile };
+  },
+
+  async updateProfile(patch: Partial<Profile>): Promise<Profile> {
+    await latency();
+    mockProfile = { ...mockProfile, ...patch };
+    return { ...mockProfile };
+  },
 };
 
 /* ------------------------------------------------------------------ */
@@ -360,9 +494,16 @@ class SupabaseBackend implements TradingClient {
   private async call<T>(action: string, params: Record<string, unknown> = {}): Promise<T> {
     if (!BACKEND_URL) throw new Error("Backend URL is not set. Add it in Settings.");
     if (!BACKEND_KEY) throw new Error("Backend API key is not set. Add it in Settings.");
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "x-trademuse-key": BACKEND_KEY,
+    };
+    // After login, scope backend data to the signed-in user.
+    const token = await getAccessToken();
+    if (token) headers["Authorization"] = `Bearer ${token}`;
     const res = await fetch(BACKEND_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-trademuse-key": BACKEND_KEY },
+      headers,
       body: JSON.stringify({ action, ...params }),
     });
     let data: any = null;
@@ -412,8 +553,18 @@ class SupabaseBackend implements TradingClient {
     const { quotes } = await this.call<{ quotes: Record<string, any> }>("quotes", { symbols });
     return symbols.map((s) => {
       const q = quotes && quotes[s.toUpperCase()];
-      const last = q && (q.ask != null ? Number(q.ask) : q.bid != null ? Number(q.bid) : 0);
-      return { symbol: s.toUpperCase(), lastPrice: last || 0, dayChange: 0, dayChangePercent: 0, volume: 0 };
+      const bid = q && q.bid != null ? Number(q.bid) : undefined;
+      const ask = q && q.ask != null ? Number(q.ask) : undefined;
+      const last = ask ?? bid ?? 0;
+      return {
+        symbol: s.toUpperCase(),
+        lastPrice: last,
+        bid,
+        ask,
+        dayChange: 0,
+        dayChangePercent: 0,
+        volume: 0,
+      };
     });
   }
 
@@ -463,6 +614,36 @@ class SupabaseBackend implements TradingClient {
   async getActivity(): Promise<ActivityEntry[]> {
     throw new Error("Activity feed is not available from the backend yet.");
   }
+
+  async getProfile(): Promise<Profile> {
+    const { profile } = await this.call<{ profile: any }>("profile_get");
+    return mapProfile(profile);
+  }
+
+  async updateProfile(patch: Partial<Profile>): Promise<Profile> {
+    const { profile } = await this.call<{ profile: any }>("profile_update", {
+      name: patch.name,
+      phone: patch.phone,
+      address_street: patch.addressStreet,
+      address_city: patch.addressCity,
+      address_state: patch.addressState,
+      address_zip: patch.addressZip,
+    });
+    return mapProfile(profile);
+  }
+}
+
+function mapProfile(p: any): Profile {
+  const s = (v: unknown) => (v == null ? "" : String(v));
+  return {
+    name: s(p?.name),
+    email: s(p?.email),
+    phone: s(p?.phone),
+    addressStreet: s(p?.address_street),
+    addressCity: s(p?.address_city),
+    addressState: s(p?.address_state),
+    addressZip: s(p?.address_zip),
+  };
 }
 
 /**
